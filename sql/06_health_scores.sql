@@ -82,3 +82,41 @@ FROM final
 GROUP BY seller_category
 ORDER BY seller_count DESC;
 GO
+-- ============================================
+-- MARKETPLACE HEALTH SCORE (Executive Composite)
+-- ============================================
+WITH monthly_metrics AS (
+    SELECT
+        YEAR(o.order_purchase_timestamp) AS yr,
+        MONTH(o.order_purchase_timestamp) AS mo,
+        SUM(oi.price) AS revenue,
+        COUNT(DISTINCT o.order_id) AS orders,
+        AVG(CAST(r.review_score AS FLOAT)) AS avg_review,
+        100.0 * SUM(CASE WHEN o.is_delivered = 1 THEN 1 ELSE 0 END) / COUNT(*) AS delivery_rate,
+        100.0 * SUM(CASE WHEN o.is_late = 1 THEN 1 ELSE 0 END) 
+            / NULLIF(SUM(CASE WHEN o.is_delivered = 1 THEN 1 ELSE 0 END), 0) AS late_rate
+    FROM fact_orders o
+    JOIN fact_order_items oi ON o.order_id = oi.order_id
+    LEFT JOIN fact_reviews r ON o.order_id = r.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND YEAR(o.order_purchase_timestamp) >= 2017  -- exclude 2016 pilot noise
+    GROUP BY YEAR(o.order_purchase_timestamp), MONTH(o.order_purchase_timestamp)
+),
+scored AS (
+    SELECT
+        yr, mo, revenue, orders, avg_review, delivery_rate, late_rate,
+        NTILE(4) OVER (ORDER BY revenue ASC) AS revenue_score,
+        NTILE(4) OVER (ORDER BY avg_review ASC) AS review_score,
+        NTILE(4) OVER (ORDER BY delivery_rate ASC) AS delivery_score,
+        NTILE(4) OVER (ORDER BY late_rate DESC) AS late_score
+    FROM monthly_metrics
+)
+SELECT
+    yr, mo, revenue, orders,
+    ROUND(avg_review, 2) AS avg_review_score,
+    ROUND(delivery_rate, 2) AS delivery_completion_pct,
+    ROUND(late_rate, 2) AS late_delivery_pct,
+    ROUND((revenue_score * 0.3 + review_score * 0.3 + delivery_score * 0.2 + late_score * 0.2), 2) AS marketplace_health_score
+FROM scored
+ORDER BY yr, mo;
+GO
